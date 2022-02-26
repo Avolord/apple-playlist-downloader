@@ -4,18 +4,17 @@ const ProgressBar = require("progress");
 const axios = require("axios");
 const NodeID3 = require("node-id3");
 const itunesAPI = require("node-itunes-search");
+const playlist = require("./apple_playlist");
 
 const INFO_URL = "https://slider.kz/vk_auth.php?q=";
 const DOWNLOAD_URL = "https://slider.kz/download/";
-let index = -1;
-let songsList = [];
-let total = 0;
-let notFound = [];
+//temporary playlist url
+const PLAYLIST_URL = "https://music.apple.com/de/playlist/motivation/pl.u-4Joma4DTae67NlX?l=en";
+//----------------------
 
-const download = async (song, url, song_name, singer_names, query_artwork) => {
-  try {
-    let numb = index + 1;
-    console.log(`(${numb}/${total}) Starting download: ${song}`);
+async function download(song, url, song_name, singer_names, query_artwork, song_number, total_song_number) {
+  let promise = new Promise(async function(reject, resolve) {
+    console.log(`(${song_number}/${total_song_number}) Starting download: ${song}`);
     const { data, headers } = await axios({
       method: "GET",
       url: url,
@@ -69,11 +68,7 @@ const download = async (song, url, song_name, singer_names, query_artwork) => {
             /\?|<|>|\*|"|:|\||\/|\\/g,
             ""
           );
-          //console.log(genre);
-          //console.log(year);
-          //console.log(trackNumber);
-          //console.log(album);
-          //console.log(maxres);
+
           let query_artwork_file = song + ".jpg";
           download_artwork(maxres, query_artwork_file, function () {
             //console.log('Artwork downloaded');
@@ -95,8 +90,6 @@ const download = async (song, url, song_name, singer_names, query_artwork) => {
             } catch (err) {
               console.error(err);
             }
-            startDownloading();
-            //for next song!
           });
         } catch {
           console.log("Full tags not found for " + song_name);
@@ -107,29 +100,32 @@ const download = async (song, url, song_name, singer_names, query_artwork) => {
           //console.log(tags);
           const success = NodeID3.write(tags, filepath);
           console.log("WRITTEN TAGS (Only artist name and track title)");
-          startDownloading();
         }
       });
     });
 
     //for saving in file...
     data.pipe(fs.createWriteStream(`${__dirname}/songs/${song}.mp3`));
-  } catch {
-    console.log("some error came!");
-    startDownloading(); //for next song!
-  }
-};
-const download_artwork = function (uri, filename, callback) {
-  request.head(uri, function (err, res, body) {
-    //console.log('content-type:', res.headers['content-type']);
-    //console.log('content-length:', res.headers['content-length']);
+    resolve();
+  });
 
+  return promise;
+}
+
+/**
+ * Downloads the artwork from a song
+ * @param {String} uri 
+ * @param {String} filename 
+ * @param {function} callback 
+ */
+function download_artwork(uri, filename, callback) {
+  request.head(uri, function (err, res, body) {
     request(uri).pipe(fs.createWriteStream(filename)).on("close", callback);
   });
-};
-const getURL = async (song, singer, album) => {
+}
+
+async function get_url(song, singer, album, song_number, total_song_number) {
   let query = (singer + "%20" + song).replace(/\s/g, "%20");
-  // console.log(INFO_URL + query);
   const { data } = await axios.get(encodeURI(INFO_URL + query));
 
   // when no result then [{}] is returned so length is always 1, when 1 result then [{id:"",etc:""}]
@@ -137,8 +133,8 @@ const getURL = async (song, singer, album) => {
     //no result
     console.log("==[ SONG NOT FOUND! ]== : " + song);
     notFound.push(song + " - " + singer);
-    startDownloading();
-    return;
+
+    return null;
   }
 
   //avoid remix,revisited,mix
@@ -157,12 +153,10 @@ const getURL = async (song, singer, album) => {
   let songName = track.tit_art.replace(/\?|<|>|\*|"|:|\||\/|\\/g, ""); //removing special characters which are not allowed in file name
 
   if (fs.existsSync(__dirname + "/songs/" + songName + ".mp3")) {
-    let numb = index + 1;
     console.log(
-      "(" + numb + "/" + total + ") - Song already present!!!!! " + song
+      "(" + song_number + "/" + total_song_number + ") - Song already present!!!!! " + song
     );
-    startDownloading(); //next song
-    return;
+    return null;
   }
 
   let link = DOWNLOAD_URL + track.id + "/";
@@ -173,46 +167,70 @@ const getURL = async (song, singer, album) => {
   link = encodeURI(link); //to replace unescaped characters from link
 
   let artwork_query = encodeURI(track.tit_art + " " + album);
-  download(songName, link, song, singer, artwork_query);
-};
 
-const startDownloading = () => {
-  index += 1;
-  if (index === songsList.length) {
-    console.log("\n#### ALL SONGS ARE DOWNLOADED!! ####\n");
-    console.log("Songs that are not found:-");
-    let i = 1;
-    for (let song of notFound) {
-      console.log(`${i} - ${song}`);
-      i += 1;
-    }
-    if (i === 1) console.log("None!");
-    return;
-  }
-  let song = songsList[index].name;
-  let singer = songsList[index].singer;
-  let album = songsList[index].album;
-  getURL(song, singer, album);
-};
+  return { link, artwork_query, sanitized_songname: songName };
+}
 
-console.log("STARTING....");
-let playlist = require("./apple_playlist");
-playlist.getPlaylist().then((res) => {
-  if (res === "Some Error") {
-    //wrong url
-    console.log(
-      "Error: maybe the url you inserted is not of apple music playlist or check your connection!"
-    );
-    return;
-  }
-  songsList = res.songs;
-  total = res.total;
+async function download_song(song, song_number, total_song_number) {
+  let promise = new Promise(function (resolve, reject) {
+    get_url(song.name, song.singer, song.album, song_number, total_song_number)
+      .then((res) => {
+        if(res)
+        return download(res.sanitized_songname, res.link, song.name, song.singer, res.artwork_query, song_number, total_song_number);
+      })
+      .then(() => {
+        resolve();
+      })
+      .catch((err) => {
+        reject(err);
+      });
+  });
+  return promise;
+}
+
+async function start_playlist_download(playlist_data) {
+  console.log("STARTING....");
+
+  songsList = playlist_data.songs;
+  total = playlist_data.total;
   console.log("Total songs:" + total);
 
+  let missing_songs = [];
+  for (let [i, song] of playlist_data.songs.entries()) {
+    await download_song(song, i + 1, total)
+      .catch((err) => {
+        missing_songs.push(song);
+      });
+  }
+
+  console.log("\n#### ALL SONGS ARE DOWNLOADED!! ####\n");
+  console.log("Songs that could not be found:-");
+  if (missing_songs.length === 0) {
+    console.log("None!");
+  } else {
+    for (let [i, song] of missing_songs.entries()) {
+      console.log(`${i + 1} - ${song.name}`);
+    }
+  }
+}
+
+/**
+ * The entrypoint for the project
+ */
+async function main() {
   //create folder
-  let dir = __dirname + "/songs";
+  const dir = __dirname + "/songs";
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir);
   }
-  startDownloading();
-});
+
+  playlist.get_playlist(PLAYLIST_URL)
+    .then((res) => {
+      return start_playlist_download(res);
+    })
+    .catch((err) => {
+      console.log(err);
+    });
+}
+
+main();
